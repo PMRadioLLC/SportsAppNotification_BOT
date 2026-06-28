@@ -1,0 +1,17 @@
+services:
+  - type: worker
+    name: soccer-notification-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python soccer_notification_bot.py
+    envVars:
+      - key: FOOTBALL_API_KEY
+        sync: false          # you'll paste this in the Render dashboard
+      - key: FIREBASE_CREDENTIALS_JSON
+        sync: false          # you'll paste the JSON content in the Render dashboard
+      - key: TEST_MODE
+        value: false         # sends to all users in production
+      - key: LEAGUE_IDS
+        value: "1,15,29"
+      - key: POLL_INTERVAL_SECONDS
+        value: "60"
