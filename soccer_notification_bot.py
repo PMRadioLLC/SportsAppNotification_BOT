@@ -16,7 +16,7 @@ import os
 import sys
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -189,8 +189,13 @@ def get_live_matches() -> list[dict]:
     if not FOOTBALL_API_KEY or FOOTBALL_API_KEY == "your_api_football_key_here":
         log.error("FOOTBALL_API_KEY not configured in .env")
         return []
+
+    seen_ids = set()
     matches = []
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
     for league_id in LEAGUE_IDS:
+        # 1. Live matches
         try:
             r = requests.get(
                 f"{FOOTBALL_API_BASE}/fixtures",
@@ -199,13 +204,35 @@ def get_live_matches() -> list[dict]:
                 timeout=15,
             )
             r.raise_for_status()
-            data = r.json()
-            found = data.get("response", [])
-            if found:
-                log.info("League %d: %d live matches", league_id, len(found))
-            matches.extend(found)
+            for m in r.json().get("response", []):
+                fid = m.get("fixture", {}).get("id")
+                if fid and fid not in seen_ids:
+                    seen_ids.add(fid)
+                    matches.append(m)
         except requests.RequestException as exc:
-            log.error("API error (league %d): %s", league_id, exc)
+            log.error("API error live (league %d): %s", league_id, exc)
+
+        # 2. Today's fixtures — catches matches that finished during the sleep window
+        try:
+            r = requests.get(
+                f"{FOOTBALL_API_BASE}/fixtures",
+                headers=_HEADERS,
+                params={"date": today, "league": league_id, "season": 2026},
+                timeout=15,
+            )
+            r.raise_for_status()
+            for m in r.json().get("response", []):
+                fid = m.get("fixture", {}).get("id")
+                status = m.get("fixture", {}).get("status", {}).get("short", "")
+                # Only include finished matches not already in the live list
+                if fid and fid not in seen_ids and status in ("FT", "AET", "PEN"):
+                    seen_ids.add(fid)
+                    matches.append(m)
+        except requests.RequestException as exc:
+            log.error("API error today (league %d): %s", league_id, exc)
+
+    if matches:
+        log.info("League %d: %d matches to process", league_id, len(matches))
     return matches
 
 def get_match_events(fixture_id: str) -> list[dict]:
