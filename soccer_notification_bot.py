@@ -19,9 +19,16 @@ import logging
 from datetime import datetime
 
 import requests
+from requests.adapters import HTTPAdapter
 from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, messaging, firestore
+import urllib3
+
+# Suppress connection pool warnings — harmless with multicast to 151 tokens
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+logging_urllib3 = __import__("logging").getLogger("urllib3")
+logging_urllib3.setLevel(__import__("logging").ERROR)
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
