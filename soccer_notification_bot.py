@@ -186,54 +186,48 @@ _HEADERS = {
 }
 
 def get_live_matches() -> list[dict]:
+    """
+    Single request: live=all (no league filter) → filter by LEAGUE_IDS in Python.
+    Returns only matches belonging to our configured leagues.
+    """
     if not FOOTBALL_API_KEY or FOOTBALL_API_KEY == "your_api_football_key_here":
         log.error("FOOTBALL_API_KEY not configured in .env")
         return []
+    try:
+        r = requests.get(
+            f"{FOOTBALL_API_BASE}/fixtures",
+            headers=_HEADERS,
+            params={"live": "all"},
+            timeout=15,
+        )
+        r.raise_for_status()
+        all_live = r.json().get("response", [])
+        matches = [
+            m for m in all_live
+            if m.get("league", {}).get("id") in LEAGUE_IDS
+        ]
+        if matches:
+            log.info("%d monitored matches live", len(matches))
+        return matches
+    except requests.RequestException as exc:
+        log.error("API error (live=all): %s", exc)
+        return []
 
-    seen_ids = set()
-    matches = []
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-    for league_id in LEAGUE_IDS:
-        # 1. Live matches
-        try:
-            r = requests.get(
-                f"{FOOTBALL_API_BASE}/fixtures",
-                headers=_HEADERS,
-                params={"live": "all", "league": league_id},
-                timeout=15,
-            )
-            r.raise_for_status()
-            for m in r.json().get("response", []):
-                fid = m.get("fixture", {}).get("id")
-                if fid and fid not in seen_ids:
-                    seen_ids.add(fid)
-                    matches.append(m)
-        except requests.RequestException as exc:
-            log.error("API error live (league %d): %s", league_id, exc)
-
-        # 2. Today's fixtures — catches matches that finished during the sleep window
-        try:
-            r = requests.get(
-                f"{FOOTBALL_API_BASE}/fixtures",
-                headers=_HEADERS,
-                params={"date": today, "league": league_id, "season": 2026},
-                timeout=15,
-            )
-            r.raise_for_status()
-            for m in r.json().get("response", []):
-                fid = m.get("fixture", {}).get("id")
-                status = m.get("fixture", {}).get("status", {}).get("short", "")
-                # Only include finished matches not already in the live list
-                if fid and fid not in seen_ids and status in ("FT", "AET", "PEN"):
-                    seen_ids.add(fid)
-                    matches.append(m)
-        except requests.RequestException as exc:
-            log.error("API error today (league %d): %s", league_id, exc)
-
-    if matches:
-        log.info("League %d: %d matches to process", league_id, len(matches))
-    return matches
+def get_fixture_by_id(fixture_id: str) -> dict | None:
+    """Fetch a single fixture by ID — used to confirm FT after it drops off live feed."""
+    try:
+        r = requests.get(
+            f"{FOOTBALL_API_BASE}/fixtures",
+            headers=_HEADERS,
+            params={"id": fixture_id},
+            timeout=15,
+        )
+        r.raise_for_status()
+        resp = r.json().get("response", [])
+        return resp[0] if resp else None
+    except requests.RequestException as exc:
+        log.error("API error (fixture %s): %s", fixture_id, exc)
+        return None
 
 def get_match_events(fixture_id: str) -> list[dict]:
     """Fetch goal events for a fixture (returns goals only)."""
@@ -413,16 +407,39 @@ def run():
     mode = "TEST (dev device only)" if TEST_MODE else "PRODUCTION (all users)"
     log.info("Soccer Notification Bot started | mode: %s | poll: %ds", mode, POLL_INTERVAL)
 
+    # Track which match IDs we last saw as live so we can detect when they drop off
+    active_match_ids: set[str] = set()
+
     while True:
         log.info("── Polling live matches ──")
         try:
             matches = get_live_matches()
+            current_ids = {str(m.get("fixture", {}).get("id")) for m in matches}
             log.info("Live matches found: %d", len(matches))
+
+            # Process all currently live matches
             for match in matches:
                 try:
                     process_match(match)
                 except Exception as exc:
                     log.error("Error processing match: %s", exc, exc_info=True)
+
+            # Check matches that just disappeared from the live feed — may be FT
+            dropped_ids = active_match_ids - current_ids
+            for mid in dropped_ids:
+                state = _get_match_state(mid)
+                if state.get("notified_fulltime"):
+                    continue  # already handled
+                log.info("Match %s dropped from live feed — checking final status", mid)
+                fixture = get_fixture_by_id(mid)
+                if fixture:
+                    try:
+                        process_match(fixture)
+                    except Exception as exc:
+                        log.error("Error processing dropped match %s: %s", mid, exc, exc_info=True)
+
+            active_match_ids = current_ids
+
         except Exception as exc:
             log.error("Poll error: %s", exc, exc_info=True)
 
